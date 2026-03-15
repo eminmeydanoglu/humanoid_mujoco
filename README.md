@@ -1,6 +1,8 @@
 # humanoid-mujoco
 
-MuJoCo + Unitree G1 teleop starter project.
+Unitree G1 MuJoCo workspace, now focused on RL-based locomotion.
+
+Legacy keyboard teleop code is archived under `archive/teleop_legacy/`.
 
 ## Setup
 
@@ -10,24 +12,6 @@ git clone --depth 1 --filter=blob:none --sparse https://github.com/google-deepmi
 git -C mujoco_menagerie sparse-checkout set unitree_g1
 ```
 
-## Run G1 keyboard teleop
+## Next
 
-```bash
-uv run g1-teleop
-```
-
-Controls:
-
-- `W/S`: forward +/-
-- `A/D`: lateral left/right
-- `Q/E`: yaw left/right
-- `U/J`: arm lift +/-
-- `H/K`: arm swing left/right
-- `SPACE`: zero all commands
-- `R`: reset to stand pose
-
-## Run tests
-
-```bash
-uv run pytest -q
-```
+RL execution plan: `docs/rl_plan.md`.

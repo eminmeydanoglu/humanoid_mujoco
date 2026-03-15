@@ -10,9 +10,6 @@ dependencies = [
     "mujoco>=3.5.0",
 ]
 
-[project.scripts]
-g1-teleop = "humanoid_mujoco.teleop.g1_keyboard:main"
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
