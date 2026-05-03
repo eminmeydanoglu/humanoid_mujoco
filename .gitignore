@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 *.pyc
 mujoco_menagerie/
+logs/
+g1_policy_checkpoints/
+CLAUDE.md
