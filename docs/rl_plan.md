@@ -30,7 +30,7 @@ humanoid_mujoco/
 │   └── g1_env.py             # gymnasium.Env
 ├── rewards/
 │   ├── __init__.py
-│   └── reward_functions.py   # 11 reward terimi
+│   └── reward_functions.py   # 13 reward terimi
 ├── teleop/                    # MEVCUT — dokunulmaz
 └── __init__.py
 train.py                       # PPO eğitim giriş noktası
@@ -42,16 +42,19 @@ play.py                        # Eğitilmiş policy görselleştirme
 ## Bağımlılıklar
 
 ```bash
-uv add gymnasium numpy "stable-baselines3>=2.3.0"
+uv add gymnasium numpy "stable-baselines3>=2.3.0" tensorboard rich tqdm
 ```
 
 ```toml
 # pyproject.toml
 dependencies = [
     "mujoco>=3.5.0",
-    "gymnasium>=1.0.0",
-    "numpy>=1.26",
+    "gymnasium>=1.2.3",
+    "numpy>=2.4.2",
     "stable-baselines3>=2.3.0",
+    "tensorboard>=2.20.0",
+    "rich>=15.0.0",
+    "tqdm>=4.67.3",
 ]
 ```
 
@@ -70,20 +73,23 @@ class G1Config:
     # Simülasyon
     dt: float = 0.02            # 50 Hz
     gait_period: float = 0.8    # saniye
-    action_scale: float = 0.25  # pozisyon hedefi ölçeği
+    action_scale: float = 0.1   # pozisyon hedefi ölçeği (kp=500 → max ~50 N⋅m)
 
     # Episode
     max_episode_steps: int = 1000   # 20 saniye (50 Hz × 1000)
 
-    # Velocity komut aralıkları
-    cmd_vx_range: tuple[float, float] = (-0.3, 0.8)
-    cmd_vy_range: tuple[float, float] = (-0.3, 0.3)
-    cmd_yaw_range: tuple[float, float] = (-0.5, 0.5)
+    # Velocity komut aralıkları (stage 0 başlangıcı; curriculum ile genişler)
+    cmd_vx_range: tuple[float, float] = (0.3, 0.8)
+    cmd_vy_range: tuple[float, float] = (0.0, 0.0)
+    cmd_yaw_range: tuple[float, float] = (0.0, 0.0)
 
     # Terminate eşikleri
     min_base_height: float = 0.3
     max_roll: float = 0.785    # 45 derece (radyan)
     max_pitch: float = 0.785
+
+    # Hedef yükseklik
+    target_base_height: float = 0.78  # metre
 
     # Reward ağırlıkları
     w_lin_vel: float = 2.0
@@ -91,15 +97,21 @@ class G1Config:
     w_alive: float = 0.5
     w_orientation: float = 0.2
     w_base_height: float = 0.1
+    w_lin_vel_z: float = 0.5
+    w_ang_vel_xy: float = 0.05
     w_torques: float = 0.0002
-    w_action_rate: float = 0.05
-    w_feet_contact: float = 0.3
-    w_feet_clearance: float = 0.2
+    w_joint_vel: float = 0.0001
+    w_action_rate: float = 0.005
+    w_feet_contact: float = 1.0
+    w_feet_clearance: float = 0.5
+    w_soft_dof_limit: float = 1.0
+    soft_dof_pos_limit_factor: float = 0.9
     vel_tracking_sigma: float = 0.25
 
     # Domain randomization
     friction_range: tuple[float, float] = (0.3, 1.5)
     mass_offset_range: tuple[float, float] = (-2.0, 2.0)
+    push_enabled: bool = False
     push_interval_steps: int = 300
     push_force_range: float = 50.0    # Newton
 ```
@@ -108,23 +120,26 @@ class G1Config:
 
 ## Modül 2: Reward Fonksiyonları — `humanoid_mujoco/rewards/reward_functions.py`
 
-Her fonksiyon `(data, model, config, cmd, last_action, phase)` alır, `float` döndürür.
+Her fonksiyon `(model, data, config, cmd, action, last_action, phase)` alır, `float` döndürür.
 
-| # | Fonksiyon | Formül |
-|---|---|---|
-| 1 | `reward_lin_vel_tracking` | exp(-‖cmd_xy − vel_xy‖² / σ²) |
-| 2 | `reward_ang_vel_tracking` | exp(-(cmd_yaw − ang_vel_z)² / σ²) |
-| 3 | `penalty_lin_vel_z` | base_vel_z² |
-| 4 | `penalty_ang_vel_xy` | ang_vel_x² + ang_vel_y² |
-| 5 | `penalty_orientation` | gravity_x² + gravity_y² |
-| 6 | `penalty_base_height` | (base_z − 0.78)² |
-| 7 | `penalty_torques` | Σ(data.actuator_force²) |
-| 8 | `penalty_joint_vel` | Σ(qvel[6:]²) |
-| 9 | `penalty_action_rate` | Σ((action − last_action)²) |
-| 10 | `reward_feet_contact_timing` | gait clock ile ayak kontağı senkronizasyonu |
-| 11 | `reward_feet_clearance` | swing fazında min foot clearance (0.05 m) |
+| # | Fonksiyon | Ağırlık | Formül |
+|---|---|---|---|
+| 1 | `reward_lin_vel_tracking` | +2.0 | exp(-‖cmd_xy − vel_xy‖² / σ²) |
+| 2 | `reward_ang_vel_tracking` | +1.0 | exp(-(cmd_yaw − ang_vel_z)² / σ²) |
+| 3 | alive bonus | +0.5 | sabit |
+| 4 | `reward_feet_contact_timing` | +1.0 | gait clock ile ayak kontağı senkronizasyonu |
+| 5 | `reward_feet_clearance` | +0.5 | swing fazında yerden yükseklik |
+| 6 | `penalty_orientation` | −0.2 | gravity_x² + gravity_y² |
+| 7 | `penalty_base_height` | −0.1 | (base_z − 0.78)² |
+| 8 | `penalty_lin_vel_z` | −0.5 | base_vel_z² |
+| 9 | `penalty_ang_vel_xy` | −0.05 | ang_vel_x² + ang_vel_y² |
+| 10 | `penalty_torques` | −2e-4 | Σ(data.actuator_force²) |
+| 11 | `penalty_joint_vel` | −1e-4 | Σ(qvel[6:]²) |
+| 12 | `penalty_action_rate` | −0.005 | Σ((action − last_action)²) |
+| 13 | `penalty_soft_dof_pos_limit` | −1.0 | Σ max(0, \|normalized\| − 0.9)² |
 
-`compute_reward()` tüm terimleri config ağırlıklarıyla toplar.
+`compute_reward_terms()` tüm terimleri dict olarak döndürür (TensorBoard'a kaydedilir).
+`compute_reward()` ağırlıklı toplamı döndürür.
 
 ---
 
@@ -175,7 +190,7 @@ data.qpos += rng.normal(0, 0.02, data.qpos.shape)
 data.qvel += rng.normal(0, 0.1,  data.qvel.shape)
 ```
 
-Push disturbance her `push_interval_steps` adımda `step()` içinde uygulanır.
+Push disturbance her `push_interval_steps` adımda `step()` içinde uygulanır (`push_enabled=True` ise).
 
 ---
 
@@ -183,37 +198,52 @@ Push disturbance her `push_interval_steps` adımda `step()` içinde uygulanır.
 
 ```python
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
 
-envs = SubprocVecEnv([make_env(config)] * n_envs)
+n_steps = 512
+base_env = VecMonitor(SubprocVecEnv([make_env(config)] * n_envs))
+env = VecNormalize(base_env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=0.99)
+
 model = PPO(
     "MlpPolicy",
-    envs,
-    policy_kwargs=dict(net_arch=[512, 256, 128], activation_fn=nn.ELU),
-    learning_rate=3e-4,
-    n_steps=24,
+    env,
+    policy_kwargs=dict(net_arch=[512, 256, 128], activation_fn=nn.ELU, log_std_init=-1.0),
+    learning_rate=lambda f: 3e-4 * f,   # lineer azalma
+    n_steps=n_steps,                     # 512 adım (tam gait döngüsü için)
+    batch_size=n_envs * n_steps // 4,    # 4 minibatch
     n_epochs=5,
     clip_range=0.2,
+    clip_range_vf=0.2,
     gamma=0.99,
     gae_lambda=0.95,
-    ent_coef=0.01,
+    ent_coef=0.05,
+    target_kl=0.01,
+    vf_coef=1.0,
     max_grad_norm=1.0,
     tensorboard_log="./logs/",
 )
-model.learn(total_timesteps=50_000_000)
-model.save("g1_policy")
+model.learn(total_timesteps=50_000_000, callback=CallbackList([...]))
 ```
+
+### Callback'ler
+
+| Callback | Görev |
+|---|---|
+| `CheckpointCallback` | Her 1M adımda `.zip` kaydeder |
+| `VecNormalizeSaveCallback` | Her 1M adımda `_vecnorm.pkl` kaydeder |
+| `CurriculumCallback` | 50k adımlık pencerede 3 ardışık kontrol, eşiği geçince sonraki aşamaya |
+| `RewardTermLogger` | Her rollout'ta 13 reward terimini TensorBoard'a kaydeder |
 
 ### Curriculum (4 Aşama)
 
-| Aşama | vx_max | vy_max | yaw_max | Push |
+| Aşama | vx (m/s) | vy (m/s) | yaw (rad/s) | Push |
 |---|---|---|---|---|
-| 0 | 0.3 | 0.0 | 0.0 | — |
-| 1 | 0.8 | 0.2 | 0.3 | — |
-| 2 | 0.8 | 0.3 | 0.5 | — |
-| 3 | 0.8 | 0.3 | 0.5 | ✓ |
+| 0 | 0.3 → 0.8 | 0.0 | 0.0 | — |
+| 1 | −0.3 → 0.8 | ±0.2 | ±0.3 | — |
+| 2 | −0.3 → 0.8 | ±0.3 | ±0.5 | — |
+| 3 | −0.3 → 0.8 | ±0.3 | ±0.5 | ✓ |
 
-Geçiş: son 100 episode ortalama reward > 5.0 ise sonraki aşamaya.
+Geçiş: `ep_rew_mean > 5.0` koşulu 3 ardışık 50k-adım penceresinde sağlanınca sonraki aşamaya geçilir.
 
 ---
 
@@ -259,9 +289,12 @@ uv run python play.py --policy g1_policy.zip --headless-steps 500
 uv run pytest
 ```
 
-### `tests/test_g1_env.py` — Yeni Test Dosyası
+### `tests/test_g1_env.py` — Test Dosyası
 
 - `test_env_reset_returns_valid_obs` — obs shape ve dtype kontrolü
-- `test_env_step_zero_action` — sıfır aksiyonla adım, sonuçlar finite mi
-- `test_env_terminate_on_fall` — `data.qpos` manipüle edip terminate assert
 - `test_observation_space_matches_obs` — gymnasium space bounds check
+- `test_env_step_zero_action` — sıfır aksiyonla adım, sonuçlar finite mi
+- `test_env_step_random_actions` — rastgele aksiyonlarla 50 adım
+- `test_env_terminate_on_fall` — `data.qpos` manipüle edip terminate assert
+- `test_action_space_bounds` — aksiyon uzayı [-1, 1] ve doğru boyut
+- `test_config_update_changes_command_range` — `update_config()` ile curriculum geçişi
