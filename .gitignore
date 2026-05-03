@@ -6,3 +6,4 @@ mujoco_menagerie/
 logs/
 g1_policy_checkpoints/
 CLAUDE.md
+docs/training_log.md
