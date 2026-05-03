@@ -7,11 +7,19 @@ name = "humanoid-mujoco"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "gymnasium>=1.2.3",
     "mujoco>=3.5.0",
+    "numpy>=2.4.2",
+    "rich>=15.0.0",
+    "stable-baselines3>=2.3.0",
+    "tensorboard>=2.20.0",
+    "tqdm>=4.67.3",
 ]
 
 [project.scripts]
 g1-teleop = "humanoid_mujoco.teleop.g1_keyboard:main"
+g1-train  = "train:main"
+g1-play   = "play:main"
 
 [dependency-groups]
 dev = [
@@ -26,3 +34,4 @@ packages = ["humanoid_mujoco"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-p no:launch_testing.pytest.launch_test"
