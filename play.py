@@ -8,6 +8,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from humanoid_mujoco.config.g1_config import G1Config
 from humanoid_mujoco.envs.g1_env import G1LocomotionEnv
@@ -45,6 +46,34 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _vecnormalize_path(policy_path: Path) -> Path:
+    if policy_path.suffix == ".zip":
+        return policy_path.with_name(f"{policy_path.stem}_vecnorm.pkl")
+    return policy_path.with_name(f"{policy_path.name}_vecnorm.pkl")
+
+
+def _load_vecnormalize(policy_path: Path, config: G1Config) -> VecNormalize:
+    vecnorm_path = _vecnormalize_path(policy_path)
+    if not vecnorm_path.exists():
+        raise FileNotFoundError(
+            f"VecNormalize stats not found: {vecnorm_path}\n"
+            "Expected a checkpoint pair: policy .zip plus matching _vecnorm.pkl"
+        )
+    normalizer = VecNormalize.load(
+        str(vecnorm_path),
+        DummyVecEnv([lambda: G1LocomotionEnv(config)]),
+    )
+    normalizer.training = False
+    normalizer.norm_reward = False
+    return normalizer
+
+
+def _predict_action(policy: PPO, normalizer: VecNormalize, obs: np.ndarray) -> np.ndarray:
+    norm_obs = normalizer.normalize_obs(obs[None, :])[0]
+    action, _ = policy.predict(norm_obs, deterministic=True)
+    return action
+
+
 def main() -> None:
     args = parse_args()
 
@@ -54,6 +83,7 @@ def main() -> None:
 
     env = G1LocomotionEnv(config)
     policy = PPO.load(str(args.policy), device="cpu")
+    normalizer = _load_vecnormalize(args.policy, config)
 
     _print_controls()
 
@@ -61,12 +91,13 @@ def main() -> None:
         obs, _ = env.reset()
         total_reward = 0.0
         for step in range(args.headless_steps):
-            action, _ = policy.predict(obs, deterministic=True)
+            action = _predict_action(policy, normalizer, obs)
             obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
             if terminated or truncated:
                 obs, _ = env.reset()
         print(f"headless_done steps={args.headless_steps} total_reward={total_reward:.2f}")
+        normalizer.close()
         return
 
     # Keyboard command state
@@ -111,8 +142,9 @@ def main() -> None:
 
             # Propagate current command into env
             env._cmd[:] = cmd
+            obs = env._get_obs()
 
-            action, _ = policy.predict(obs, deterministic=True)
+            action = _predict_action(policy, normalizer, obs)
             obs, _, terminated, truncated, _ = env.step(action)
 
             if terminated or truncated:
@@ -121,10 +153,11 @@ def main() -> None:
             viewer.sync()
 
             if args.realtime_scale > 0.0:
-                target_dt = model.opt.timestep / args.realtime_scale
+                target_dt = env.control_dt / args.realtime_scale
                 elapsed = time.perf_counter() - loop_start
                 if elapsed < target_dt:
                     time.sleep(target_dt - elapsed)
+    normalizer.close()
 
 
 if __name__ == "__main__":
