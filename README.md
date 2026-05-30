@@ -6,21 +6,22 @@ Train a [Unitree G1](https://www.unitree.com/g1/) humanoid robot to track veloci
 
 - **Algorithm**: PPO (stable-baselines3) with VecNormalize and 16 parallel environments
 - **Simulator**: MuJoCo 3.x via [mujoco-menagerie](https://github.com/google-deepmind/mujoco_menagerie) MJCF model
-- **Observation**: 102-dim — base linear/angular velocity, projected gravity, velocity command, joint positions/velocities, last action, gait clock
-- **Action**: 23-dim normalized joint position targets (scaled to ±0.1 rad before adding to default pose)
-- **Reward**: 13 terms covering velocity tracking, upright posture, gait timing, foot clearance, energy efficiency
+- **Observation**: 101-dim — base linear/angular velocity, projected gravity, velocity command, joint positions/velocities, last action, gait clock
+- **Action**: 29-dim normalized joint position targets (scaled to ±0.5 rad before adding to default pose)
+- **Reward**: 15 terms covering velocity tracking, upright posture, gait timing, foot clearance, energy efficiency, waist/ankle regularization
 
 ## Requirements
 
 - Python ≥ 3.11
 - [uv](https://github.com/astral-sh/uv)
-- `mujoco_menagerie/` submodule (run `git submodule update --init`)
+- `mujoco_menagerie/` checkout containing `unitree_g1`
 
 ## Installation
 
 ```bash
-git submodule update --init
 uv sync
+git clone --depth 1 --filter=blob:none --sparse https://github.com/google-deepmind/mujoco_menagerie.git
+git -C mujoco_menagerie sparse-checkout set unitree_g1
 ```
 
 ## Usage
@@ -81,16 +82,6 @@ uv run tensorboard --logdir logs/
 uv run pytest tests/
 ```
 
-## Curriculum
-
-Training progresses through four stages, each widening command ranges and enabling disturbances. `CurriculumCallback` auto-advances when the rolling mean reward exceeds **5.0** for three consecutive evaluation windows (50 K-step intervals).
-
-| Stage | vx (m/s) | vy (m/s) | yaw (rad/s) | Push forces |
-|-------|----------|----------|-------------|-------------|
-| 0 | 0.3 → 0.8 | 0.0 | 0.0 | off |
-| 1 | −0.3 → 0.8 | ±0.2 | ±0.3 | off |
-| 2 | −0.3 → 0.8 | ±0.3 | ±0.5 | off |
-| 3 | −0.3 → 0.8 | ±0.3 | ±0.5 | **on** |
 
 ## Reward terms
 
@@ -99,16 +90,18 @@ Training progresses through four stages, each widening command ranges and enabli
 | `lin_vel` | 2.0 | xy velocity tracking (Gaussian) |
 | `ang_vel` | 1.0 | yaw rate tracking (Gaussian) |
 | `alive` | 0.5 | constant per-step bonus |
-| `feet_contact` | 1.0 | foot contact timing vs. gait clock |
-| `feet_clear` | 0.5 | foot clearance during swing phase |
+| `feet_contact` | 2.0 | foot contact timing vs. gait clock |
+| `feet_clear` | 1.5 | foot clearance during swing phase |
 | `orientation` | −0.2 | upright posture penalty |
 | `base_height` | −0.1 | height deviation from 0.78 m |
-| `lin_vel_z` | −0.5 | vertical velocity penalty |
+| `lin_vel_z` | −2.0 | vertical velocity penalty |
 | `ang_vel_xy` | −0.05 | roll/pitch rate penalty |
 | `torques` | −0.0002 | actuator force penalty |
 | `joint_vel` | −0.0001 | joint velocity penalty |
 | `action_rate` | −0.005 | action smoothness penalty |
 | `dof_limit` | −1.0 | soft joint limit penalty |
+| `waist_deviation` | −2.0 | waist joint deviation penalty |
+| `ankle_deviation` | −2.0 | ankle pitch deviation penalty |
 
 ## Checkpoints
 
@@ -127,12 +120,12 @@ g1_policy_{N}_steps_vecnorm.pkl  ← VecNormalize statistics
 humanoid_mujoco/
   config/g1_config.py       — G1Config dataclass + curriculum definitions
   envs/g1_env.py            — G1LocomotionEnv (gymnasium.Env)
-  rewards/reward_functions.py — 13 reward terms + helper math
+  rewards/reward_functions.py — 15 reward terms + helper math
   teleop/                   — keyboard teleoperation (no RL policy)
 train.py                    — PPO setup, callbacks, VecNormalize, resume logic
 play.py                     — policy rollout with MuJoCo viewer
 tests/                      — pytest suite
-mujoco_menagerie/           — git submodule (MJCF models)
+mujoco_menagerie/           — sparse checkout of MJCF models
 g1_policy_checkpoints/      — saved .zip + _vecnorm.pkl pairs
 logs/                       — TensorBoard event files
 ```

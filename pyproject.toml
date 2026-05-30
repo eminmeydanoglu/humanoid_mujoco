@@ -32,6 +32,10 @@ package = true
 [tool.hatch.build.targets.wheel]
 packages = ["humanoid_mujoco"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"train.py" = "train.py"
+"play.py" = "play.py"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-p no:launch_testing.pytest.launch_test"
+addopts = "-p no:launch_testing -p no:launch_ros"

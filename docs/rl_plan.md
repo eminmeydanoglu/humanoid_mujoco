@@ -28,7 +28,7 @@ humanoid_mujoco/
 │   └── g1_env.py             # gymnasium.Env
 ├── rewards/
 │   ├── __init__.py
-│   └── reward_functions.py   # 13 reward terms
+│   └── reward_functions.py   # 15 reward terms
 ├── teleop/                    # existing — do not modify
 └── __init__.py
 train.py                       # PPO training entry point
@@ -69,7 +69,8 @@ class G1Config:
     # Simulation
     dt: float = 0.02            # 50 Hz
     gait_period: float = 0.8    # seconds
-    action_scale: float = 0.1   # position target scale (kp=500 → max ~50 N⋅m)
+    action_scale: float = 0.5   # position target scale
+    kp: float = 150.0           # PD position gain override
 
     # Episode
     max_episode_steps: int = 1000   # 20 s (50 Hz × 1000)
@@ -93,14 +94,16 @@ class G1Config:
     w_alive: float = 0.5
     w_orientation: float = 0.2
     w_base_height: float = 0.1
-    w_lin_vel_z: float = 0.5
+    w_lin_vel_z: float = 2.0
     w_ang_vel_xy: float = 0.05
     w_torques: float = 0.0002
     w_joint_vel: float = 0.0001
     w_action_rate: float = 0.005
-    w_feet_contact: float = 1.0
-    w_feet_clearance: float = 0.5
+    w_feet_contact: float = 2.0
+    w_feet_clearance: float = 1.5
     w_soft_dof_limit: float = 1.0
+    w_waist_deviation: float = 2.0
+    w_ankle_deviation: float = 2.0
     soft_dof_pos_limit_factor: float = 0.9
     vel_tracking_sigma: float = 0.25
 
@@ -121,16 +124,18 @@ class G1Config:
 | 1 | `reward_lin_vel_tracking` | +2.0 | exp(−‖cmd_xy − vel_xy‖² / σ²) |
 | 2 | `reward_ang_vel_tracking` | +1.0 | exp(−(cmd_yaw − ang_vel_z)² / σ²) |
 | 3 | alive bonus | +0.5 | constant |
-| 4 | `reward_feet_contact_timing` | +1.0 | foot contact synced to gait clock |
-| 5 | `reward_feet_clearance` | +0.5 | foot height during swing phase |
+| 4 | `reward_feet_contact_timing` | +2.0 | foot contact synced to gait clock |
+| 5 | `reward_feet_clearance` | +1.5 | foot height during swing phase |
 | 6 | `penalty_orientation` | −0.2 | gravity_x² + gravity_y² |
 | 7 | `penalty_base_height` | −0.1 | (base_z − 0.78)² |
-| 8 | `penalty_lin_vel_z` | −0.5 | base_vel_z² |
+| 8 | `penalty_lin_vel_z` | −2.0 | base_vel_z² |
 | 9 | `penalty_ang_vel_xy` | −0.05 | ang_vel_x² + ang_vel_y² |
 | 10 | `penalty_torques` | −2e-4 | Σ(actuator_force²) |
 | 11 | `penalty_joint_vel` | −1e-4 | Σ(qvel[6:]²) |
 | 12 | `penalty_action_rate` | −0.005 | Σ((action − last_action)²) |
 | 13 | `penalty_soft_dof_pos_limit` | −1.0 | Σ max(0, \|normalized\| − 0.9)² |
+| 14 | `penalty_waist_deviation` | −2.0 | waist joint deviation² |
+| 15 | `penalty_ankle_deviation` | −2.0 | ankle pitch deviation² |
 
 `compute_reward_terms()` returns a dict (logged to TensorBoard per rollout).
 `compute_reward()` returns the weighted sum.
@@ -152,7 +157,7 @@ class G1Config:
 | `last_action` | `nu` | previous step ctrl |
 | `clock_signal` | 2 | `[sin(phase), cos(phase)]` |
 
-**Total:** `14 + 2*(nv−6) + nu` dims (~102 for G1)
+**Total:** `14 + 2*(nv−6) + nu` dims (101 for the current G1 scene)
 
 ### `step(action)`
 
@@ -163,6 +168,8 @@ data.ctrl[:] = ctrl
 mujoco.mj_step(model, data)
 phase = (phase + 2 * pi * dt / gait_period) % (2 * pi)
 ```
+
+The implementation runs enough MuJoCo substeps per environment step for `data.time` to advance by `config.dt`.
 
 ### Termination Conditions
 
@@ -207,8 +214,8 @@ model = PPO(
     clip_range_vf=0.2,
     gamma=0.99,
     gae_lambda=0.95,
-    ent_coef=0.05,
-    target_kl=0.01,
+    ent_coef=0.003,
+    target_kl=0.1,
     vf_coef=1.0,
     max_grad_norm=1.0,
     tensorboard_log="./logs/",
@@ -223,7 +230,7 @@ model.learn(total_timesteps=50_000_000, callback=CallbackList([...]))
 | `CheckpointCallback` | saves `.zip` every 1M steps |
 | `VecNormalizeSaveCallback` | saves `_vecnorm.pkl` alongside each checkpoint |
 | `CurriculumCallback` | advances stage after 3 consecutive 50k-step windows above threshold |
-| `RewardTermLogger` | logs all 13 reward terms to TensorBoard each rollout |
+| `RewardTermLogger` | logs all 15 reward terms to TensorBoard each rollout |
 
 ### Curriculum (4 Stages)
 
@@ -242,6 +249,7 @@ Advance condition: `ep_rew_mean > 5.0` for 3 consecutive 50k-step evaluation win
 
 Reuses the GLFW viewer loop and key bindings from `g1_keyboard.py`.
 PPO policy `predict()` replaces `G1TeleopController.compute_ctrl()`.
+The matching `_vecnorm.pkl` file is loaded alongside the PPO checkpoint for observation normalization.
 
 ```bash
 uv run python play.py --policy g1_policy.zip
@@ -285,7 +293,9 @@ uv run pytest
 - `test_env_reset_returns_valid_obs` — obs shape and dtype
 - `test_observation_space_matches_obs` — gymnasium space bounds
 - `test_env_step_zero_action` — step with zero action, results finite
+- `test_env_step_advances_config_dt` — environment step advances simulation by `config.dt`
 - `test_env_step_random_actions` — 50 random-action steps
 - `test_env_terminate_on_fall` — manipulate `qpos` and assert termination
 - `test_action_space_bounds` — action space is `[-1, 1]` with correct shape
 - `test_config_update_changes_command_range` — `update_config()` for curriculum
+- `test_push_force_is_cleared_after_step` — push forces do not persist in `xfrc_applied`
