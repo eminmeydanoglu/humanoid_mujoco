@@ -33,6 +33,13 @@ class G1LocomotionEnv(gym.Env):
         mjcf = str(self.config.mjcf_path)
         self.model = mujoco.MjModel.from_xml_path(mjcf)
         self.data = mujoco.MjData(self.model)
+        sim_dt = float(self.model.opt.timestep)
+        self._control_substeps = max(1, int(round(self.config.dt / sim_dt)))
+        self.control_dt = self._control_substeps * sim_dt
+        if not math.isclose(self.control_dt, self.config.dt, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError(
+                f"config.dt={self.config.dt} is not an integer multiple of model timestep={sim_dt}"
+            )
 
         # Core dimensions
         self._nj = self.model.nv - 6       # joint DOF (excluding floating base)
@@ -50,6 +57,15 @@ class G1LocomotionEnv(gym.Env):
         self._stand_id = find_keyframe_id(self.model, "stand")
         self._base_ctrl = self._load_base_ctrl()
         self._default_qpos = self._load_default_qpos()
+
+        # Override PD gains: gainprm[0]=kp (feed-forward), biasprm[1]=-kp (feedback spring).
+        # Both must match; changing only one creates a spurious position-dependent force.
+        # biasprm[2] is the derivative gain — rescale proportionally to preserve damping ratio.
+        kp_old = 500.0
+        kp_new = self.config.kp
+        self.model.actuator_gainprm[:, 0] = kp_new
+        self.model.actuator_biasprm[:, 1] = -kp_new
+        self.model.actuator_biasprm[:, 2] *= math.sqrt(kp_new / kp_old)
 
         # Base body id for domain randomization
         self._base_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
@@ -85,6 +101,7 @@ class G1LocomotionEnv(gym.Env):
             mujoco.mj_resetDataKeyframe(self.model, self.data, self._stand_id)
         else:
             mujoco.mj_resetData(self.model, self.data)
+        self.data.xfrc_applied[:] = 0.0
 
         # Domain randomization
         self._apply_domain_randomization()
@@ -99,7 +116,7 @@ class G1LocomotionEnv(gym.Env):
 
         # Reset episode state
         self._step_count = 0
-        self._phase = 0.0
+        self._phase = self._rng.uniform(0, 2 * math.pi)
         self._last_action = np.zeros(self._nu, dtype=np.float32)
 
         return self._get_obs(), {}
@@ -115,15 +132,23 @@ class G1LocomotionEnv(gym.Env):
         ctrl[limited] = np.clip(ctrl[limited], lo[limited], hi[limited])
         self.data.ctrl[:] = ctrl
 
-        mujoco.mj_step(self.model, self.data)
+        apply_push = (
+            self.config.push_enabled
+            and self.config.push_interval_steps > 0
+            and (self._step_count + 1) % self.config.push_interval_steps == 0
+        )
+        if apply_push:
+            self._apply_push()
+
+        for _ in range(self._control_substeps):
+            mujoco.mj_step(self.model, self.data)
+
+        if apply_push:
+            self.data.xfrc_applied[self._base_body_id, :3] = 0.0
 
         # Advance gait clock
-        self._phase = (self._phase + 2 * math.pi * self.config.dt / self.config.gait_period) % (2 * math.pi)
+        self._phase = (self._phase + 2 * math.pi * self.control_dt / self.config.gait_period) % (2 * math.pi)
         self._step_count += 1
-
-        # Push disturbance
-        if self.config.push_enabled and self._step_count % self.config.push_interval_steps == 0:
-            self._apply_push()
 
         reward_terms = compute_reward_terms(
             self.model, self.data, self.config,

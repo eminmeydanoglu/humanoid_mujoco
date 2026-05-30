@@ -54,6 +54,17 @@ def test_env_step_zero_action() -> None:
     assert isinstance(truncated, bool)
 
 
+def test_env_step_advances_config_dt() -> None:
+    env = _make_env()
+    env.reset(seed=0)
+
+    start_time = env.data.time
+    action = np.zeros(env.action_space.shape, dtype=np.float32)
+    env.step(action)
+
+    assert env.data.time - start_time == pytest.approx(env.config.dt)
+
+
 def test_env_step_random_actions() -> None:
     env = _make_env()
     env.reset(seed=7)
@@ -91,3 +102,28 @@ def test_config_update_changes_command_range() -> None:
     env.update_config(cmd_vx_range=(-0.3, 0.8), cmd_vy_range=(-0.3, 0.3))
     assert env.config.cmd_vx_range == (-0.3, 0.8)
     assert env.config.cmd_vy_range == (-0.3, 0.3)
+
+
+def test_push_force_is_cleared_after_step() -> None:
+    scene = (
+        Path(__file__).resolve().parents[1]
+        / "mujoco_menagerie"
+        / "unitree_g1"
+        / "scene.xml"
+    )
+    if not scene.exists():
+        pytest.skip(f"G1 scene file not found: {scene}")
+    env = G1LocomotionEnv(
+        G1Config(
+            mjcf_path=scene,
+            push_enabled=True,
+            push_interval_steps=1,
+            push_force_range=10.0,
+        )
+    )
+    env.reset(seed=0)
+
+    action = np.zeros(env.action_space.shape, dtype=np.float32)
+    env.step(action)
+
+    assert np.allclose(env.data.xfrc_applied[env._base_body_id, :3], 0.0)
