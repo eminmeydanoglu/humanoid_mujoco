@@ -106,6 +106,35 @@ def penalty_action_rate(action: np.ndarray, last_action: np.ndarray) -> float:
     return float(np.sum((action - last_action) ** 2))
 
 
+def penalty_waist_deviation(model: mujoco.MjModel, data: mujoco.MjData) -> float:
+    """Penalty for waist joints deviating from upright (0 rad).
+
+    Prevents the policy from bending the torso backward to absorb momentum
+    instead of learning proper core stability.
+    """
+    total = 0.0
+    for name in ("waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"):
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if jid >= 0:
+            total += data.qpos[model.jnt_qposadr[jid]] ** 2
+    return total
+
+
+def penalty_ankle_deviation(model: mujoco.MjModel, data: mujoco.MjData) -> float:
+    """Penalty for extreme ankle pitch (tiptoe or heel-up).
+
+    Without this, the policy exploits tiptoe stance: the ankle site rises
+    above the clearance threshold earning clearance reward, while contact
+    detection still fires — rewarding a degenerate non-walking gait.
+    """
+    total = 0.0
+    for name in ("left_ankle_pitch_joint", "right_ankle_pitch_joint"):
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if jid >= 0:
+            total += data.qpos[model.jnt_qposadr[jid]] ** 2
+    return total
+
+
 def penalty_soft_dof_pos_limit(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -142,22 +171,29 @@ def reward_feet_contact_timing(
     phase ∈ [0, π)  → left foot grounded, right foot swinging
     phase ∈ [π, 2π) → right foot grounded, left foot swinging
 
-    Uses body-based geom lookup because G1 foot geoms are unnamed.
+    Uses a continuous force-proportional reward instead of binary matching
+    so the policy receives a gradient signal regardless of contact state.
     """
-    contact_threshold = 10.0  # Newtons
+    contact_threshold = 10.0  # Newtons (normalisation reference)
 
     left_geoms = _geoms_of_body(model, "left_ankle_roll_link")
     right_geoms = _geoms_of_body(model, "right_ankle_roll_link")
 
-    left_contact = _body_contact_force(model, data, left_geoms) > contact_threshold
-    right_contact = _body_contact_force(model, data, right_geoms) > contact_threshold
+    left_force = _body_contact_force(model, data, left_geoms)
+    right_force = _body_contact_force(model, data, right_geoms)
+
+    # Normalised contact intensity ∈ [0, 1]
+    left_norm = min(left_force / contact_threshold, 1.0)
+    right_norm = min(right_force / contact_threshold, 1.0)
 
     left_should_contact = phase < math.pi
     right_should_contact = phase >= math.pi
 
+    # Stance foot: reward proportional to contact force
+    # Swing foot: reward proportional to *absence* of contact force
     reward = 0.0
-    reward += 1.0 if left_contact == left_should_contact else 0.0
-    reward += 1.0 if right_contact == right_should_contact else 0.0
+    reward += left_norm if left_should_contact else (1.0 - left_norm)
+    reward += right_norm if right_should_contact else (1.0 - right_norm)
     return reward * 0.5  # normalise to [0, 1]
 
 
@@ -207,19 +243,21 @@ def compute_reward_terms(
 ) -> dict[str, float]:
     """Return each weighted reward term individually for logging."""
     return {
-        "lin_vel":       config.w_lin_vel        *  reward_lin_vel_tracking(data, cmd, config),
-        "ang_vel":       config.w_ang_vel        *  reward_ang_vel_tracking(data, cmd, config),
-        "alive":         config.w_alive,
-        "feet_contact":  config.w_feet_contact   *  reward_feet_contact_timing(model, data, phase),
-        "feet_clear":    config.w_feet_clearance *  reward_feet_clearance(model, data, phase),
-        "orientation":   config.w_orientation    * -penalty_orientation(data),
-        "base_height":   config.w_base_height    * -penalty_base_height(data, config),
-        "lin_vel_z":     config.w_lin_vel_z      * -penalty_lin_vel_z(data),
-        "ang_vel_xy":    config.w_ang_vel_xy     * -penalty_ang_vel_xy(data),
-        "torques":       config.w_torques        * -penalty_torques(data),
-        "joint_vel":     config.w_joint_vel      * -penalty_joint_vel(data),
-        "action_rate":   config.w_action_rate    * -penalty_action_rate(action, last_action),
-        "dof_limit":     config.w_soft_dof_limit * -penalty_soft_dof_pos_limit(model, data, config),
+        "lin_vel":          config.w_lin_vel           *  reward_lin_vel_tracking(data, cmd, config),
+        "ang_vel":          config.w_ang_vel           *  reward_ang_vel_tracking(data, cmd, config),
+        "alive":            config.w_alive,
+        "feet_contact":     config.w_feet_contact      *  reward_feet_contact_timing(model, data, phase),
+        "feet_clear":       config.w_feet_clearance    *  reward_feet_clearance(model, data, phase),
+        "orientation":      config.w_orientation       * -penalty_orientation(data),
+        "base_height":      config.w_base_height       * -penalty_base_height(data, config),
+        "lin_vel_z":        config.w_lin_vel_z         * -penalty_lin_vel_z(data),
+        "ang_vel_xy":       config.w_ang_vel_xy        * -penalty_ang_vel_xy(data),
+        "torques":          config.w_torques           * -penalty_torques(data),
+        "joint_vel":        config.w_joint_vel         * -penalty_joint_vel(data),
+        "action_rate":      config.w_action_rate       * -penalty_action_rate(action, last_action),
+        "dof_limit":        config.w_soft_dof_limit    * -penalty_soft_dof_pos_limit(model, data, config),
+        "waist_deviation":  config.w_waist_deviation   * -penalty_waist_deviation(model, data),
+        "ankle_deviation":  config.w_ankle_deviation   * -penalty_ankle_deviation(model, data),
     }
 
 
