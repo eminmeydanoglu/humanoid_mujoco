@@ -29,6 +29,20 @@ def _run_id(log_dir: Path, reset: bool) -> int:
     return max_id + 1 if reset else max(max_id, 1)
 
 
+def _validate_curriculum_stage(stage: int) -> None:
+    if stage < 0 or stage >= len(CURRICULUM_STAGES):
+        raise ValueError(
+            f"Invalid curriculum stage {stage}; expected 0..{len(CURRICULUM_STAGES) - 1}"
+        )
+
+
+def _final_policy_path(save_path: Path, checkpoint_dir: Path) -> Path:
+    path = save_path.with_suffix("") if save_path.suffix == ".zip" else save_path
+    if not path.is_absolute() and path.parent == Path("."):
+        return checkpoint_dir / path.name
+    return path
+
+
 def make_env(config: G1Config):
     def _init():
         return G1LocomotionEnv(config)
@@ -41,6 +55,7 @@ class CurriculumCallback(BaseCallback):
 
     def __init__(self, check_interval: int = 50_000, initial_stage: int = 0, verbose: int = 0) -> None:
         super().__init__(verbose)
+        _validate_curriculum_stage(initial_stage)
         self.check_interval = check_interval
         self.stage = initial_stage
         self._above_count = 0
@@ -130,6 +145,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    _validate_curriculum_stage(args.curriculum_stage)
 
     config = G1Config()
 
@@ -160,7 +176,7 @@ def main() -> None:
 
     # Apply curriculum stage (relevant for resume)
     if args.curriculum_stage > 0:
-        stage_cfg = CURRICULUM_STAGES[min(args.curriculum_stage, len(CURRICULUM_STAGES) - 1)]
+        stage_cfg = CURRICULUM_STAGES[args.curriculum_stage]
         env.env_method("update_config", **stage_cfg)
         if args.verbose:
             print(f"Applied curriculum stage {args.curriculum_stage} to all envs")
@@ -191,8 +207,8 @@ def main() -> None:
             clip_range_vf=0.2,
             gamma=0.99,
             gae_lambda=0.95,
-            ent_coef=0.05,
-            target_kl=0.01,
+            ent_coef=0.003,
+            target_kl=0.1,
             vf_coef=1.0,
             max_grad_norm=1.0,
             tensorboard_log=str(args.log_dir),
@@ -232,7 +248,8 @@ def main() -> None:
         reset_num_timesteps=args.load_path is None,
     )
 
-    final_policy = checkpoint_dir / args.save_path.name
+    final_policy = _final_policy_path(args.save_path, checkpoint_dir)
+    final_policy.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(final_policy))
     env.save(str(final_policy) + "_vecnorm.pkl")
     print(f"Policy saved: {final_policy}.zip")
